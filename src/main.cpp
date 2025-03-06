@@ -5,63 +5,49 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#include "pins.h"
+
+// Enable/disable noisy serial output (comment out to disable)
+#define DEBUG
+
+// OLED Constants
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 #define SDA           15
 #define SCL           14
 
+// Define FPS: affects (ideal) delay time between each frame
 #define FPS           16
 
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+// SSD1306 display object
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-#define LOGO_HEIGHT   4
-#define LOGO_WIDTH    16
-static const unsigned char PROGMEM logo_bmp[] =
-{ B10000000, B00000001,
-  B10000001, B10000001,
-  B10000000, B00000001,
-  B10000001, B10000001 };
-
-// Pin definition for CAMERA_MODEL_AI_THINKER
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
 
 void setup()
 {
-  Serial.begin(115200);
+  #ifdef DEBUG
+    Serial.begin(115200);
+  #endif
 
-  Wire.begin(SDA, SCL);
+  // Initialize display
+  Wire.begin(SDA, SCL); // Required if not using the 'default' SDA/SCL I2C interface pins
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C))
   { 
-    Serial.println(F("SSD1306 allocation failed"));
+    #ifdef DEBUG
+      Serial.println(F("SSD1306 allocation failed"));
+    #endif
     for(;;); // Don't proceed, loop forever
   }
   else
   {
-    Serial.println("SSD1306 initialized.");
+    #ifdef DEBUG
+      Serial.println("SSD1306 initialized.");
+    #endif
   }
   display.display();
   delay(100);
-  //display.drawBitmap(1, 1, logo_bmp, LOGO_WIDTH, LOGO_HEIGHT, 1);
-  //display.display();
   
+  // Initialize OV2640
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -82,101 +68,116 @@ void setup()
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_GRAYSCALE;
-  config.frame_size = FRAMESIZE_QVGA; // 320 x 240
+  config.pixel_format = PIXFORMAT_GRAYSCALE; // Only stores luminance values, ideal for the SSD1306
+  config.frame_size = FRAMESIZE_QVGA; // 320 x 240, smallest possible frame size
   config.jpeg_quality = 10;
   config.fb_count = 2;
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK)
   {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    return;
+    #ifdef DEBUG
+      Serial.printf("Camera init failed with error 0x%x", err);
+    #endif
+    for(;;);
   }
   else
   {
-    Serial.println("Camera initialized.");
+    #ifdef DEBUG
+      Serial.println("Camera initialized.");
+    #endif
   }
+
+  // Grab test frame from camera
   camera_fb_t * fb = NULL;
-  
   fb = esp_camera_fb_get();  
   if(!fb)
   {
-    Serial.println("Initial camera capture failed");
-    return;
+    #ifdef DEBUG
+      Serial.println("Initial camera capture failed");
+    #endif
   }
   else
   {
-    Serial.println("Initial camera capture successful.");
+    #ifdef DEBUG
+      Serial.println("Initial camera capture successful.");
+    #endif
   }
-  esp_camera_fb_return(fb); // Free the memory where fb is stored
+  esp_camera_fb_return(fb); // Free the memory where framebuffer is stored
   
+  #ifdef DEBUG
+    Serial.println("Initializing mirroring...");
+  #endif
   delay(1000);
 }
 
 void loop()
 {
+  // Frametime counter
   unsigned long zeroTime = millis();
-  // Get image from camera
+
+  // Get new frame from camera
   camera_fb_t * fb = NULL;
   fb = esp_camera_fb_get();
+
   if(!fb)
   {
-    Serial.println("Camera capture failed");
+    #ifdef DEBUG
+      Serial.println("Camera capture failed");
+    #endif
   }
   else
   {
-    Serial.println("Capture successful.");
-    // Downscale using nearest-neighbor interpolation, quantize based on individual brightness values
-    // Output buffer to store the resized image
-    bool *resized_image = new bool[128 * 64];
-    // Pointer to the input framebuffer (grayscale pixel data)
-    uint8_t *input_image = fb->buf;
+    // Downscale using nearest-neighbor interpolation and quantize based on brightness values
+    bool *resized_image = new bool[128 * 64]; // Boolean output buffer to store the resized image as binary luminance values
+    uint8_t *input_image = fb->buf; // Pointer to the framebuffer (grayscale pixel data, luminance values as uint8_t array)
+    uint8_t y_drop = 16; // Crop vertically by 16 pixels to fit image in the 128x64 screen
     // Iterate over each pixel in the output image
-    uint8_t y_drop = 16;  // Crop vertically by 16 pixels each end
-    for (uint64_t y = y_drop; y < y_drop + 64; y++)
+    for (uint32_t y = y_drop; y < y_drop + 64; y++)
     {
-      // Find the corresponding row in the input image
-      uint64_t src_y = (uint64_t)(y * 2.5);
-      for (uint64_t x = 0; x < 128; x++)
+      uint32_t src_y = (uint32_t)(y * 2.5); // Find the nearest neighboring row in the input image
+      for (uint32_t x = 0; x < 128; x++)
       {
-        // Find the corresponding column in the input image
-        uint64_t src_x = (uint64_t)(x * 2.5);
-        // Copy the nearest pixel from the input to the output, while quantizing based on brightness values
+        uint32_t src_x = (uint32_t)(x * 2.5); // Find the nearest neighboring column in the input image, and thus the NN-pixel
+        
+        // Copy the nearest neighbor pixel from the input to the output, while quantizing (~0.47 of max brightness as quantization point)
         resized_image[(y - y_drop) * 128 + x] = (input_image[src_y * 320 + src_x] >= 120);
       }
     }
-    Serial.println("Made it past downsampler.");
 
-    // Free memory
+    // Free camera framebuffer memory
     esp_camera_fb_return(fb);
 
-    // Process image to SSD1306 compatible bitmap
-    unsigned char *image_bmp = new unsigned char[128 * 8];
+    // Process image to SSD1306 compatible bitmap (groups of 8 horizontal pixel values stored as uint8_t values equivalent to their representation in an 8-bit unsigned binary number)
+    unsigned char *image_bmp = new unsigned char[16 * 64];
+    // Iterate over each data group in the output bitmap
     for (int y = 0; y < 64; y++)
     {
       for (int x_g = 0; x_g < 16; x_g++)
       {
-        uint8_t byte_val = 0;
+        uint8_t byte_val = 0; // Empty 8 bit unsigned integer
+        // Assign bits from the resized image luminance booleans to the output bitmap group in MSB-first order
         for (int i = 0; i < 8; i++)
         {
-          // Assign bits in MSB-first order
+          // OR-assignment of left-shifted boolean values to the unsigned integer
           byte_val |= (resized_image[(y * 128) + (x_g * 8 + i)] << (7 - i));
         }
-        image_bmp[y * 16 + x_g] = byte_val;
+        // Store unsigned 8-bit integer value in the char array
+        image_bmp[(y * 16) + x_g] = byte_val;
       }
     }
     delete[] resized_image; // Free heap memory
-    Serial.println("Made it past bitmap code.");
 
     // Push image to SSD1306
     display.clearDisplay();
     display.drawBitmap(0, 0, image_bmp, 128, 64, 1);
     display.display();
+
     delete[] image_bmp; // Free heap memory
-    Serial.println("Made it past display code.");
   }
 
-  Serial.print("Took "); Serial.print((millis() - zeroTime)); Serial.println(" ms to do a frame.");
+  #ifdef DEBUG
+    Serial.print("FPS: "); Serial.println((uint64_t)(1000/(millis() - zeroTime)));
+  #endif
   // Delay for remainder of time according to FPS spec
-  delay((uint64_t)1000/FPS);
+  delay((1000/FPS) - ((millis() - zeroTime) < (1000/FPS))*(millis() - zeroTime));
 }
